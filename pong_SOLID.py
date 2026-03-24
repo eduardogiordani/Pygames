@@ -1,6 +1,7 @@
 import sys
 import math
 import array
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -23,6 +24,10 @@ class Settings:
     BALL_SPEED_Y:  float = 8.0
     AI_SPEED:      int   = 5
 
+    BOUNCE_ANGLE_VARIANCE: float = 0.35
+    BALL_MIN_VY:           float = 1.5
+    BALL_MAX_SPEED:        float = 14.0
+
     AUDIO_FREQ:     int   = 44100
     AUDIO_CHANNELS: int   = 2
     AUDIO_BUFFER:   int   = 512
@@ -36,6 +41,39 @@ class Settings:
 class Drawable(ABC):
     @abstractmethod
     def draw(self, surface: pygame.Surface) -> None: ...
+
+
+class PhysicsEngine:
+    def __init__(self, settings: Settings) -> None:
+        self._s = settings
+
+    def bounce_off_wall(self, ball: "Ball") -> None:
+        ball.vy = -ball.vy
+        ball.vy += random.uniform(-self._s.BOUNCE_ANGLE_VARIANCE,
+                                   self._s.BOUNCE_ANGLE_VARIANCE)
+        self._enforce_min_vy(ball)
+        self._clamp_speed(ball)
+
+    def bounce_off_paddle(self, ball: "Ball", paddle: "Paddle") -> None:
+        ball.vx = -ball.vx
+
+        offset = (ball.y - (paddle.y + self._s.PADDLE_HEIGHT / 2)) / (self._s.PADDLE_HEIGHT / 2)
+        ball.vy += offset * self._s.BOUNCE_ANGLE_VARIANCE * 2
+        ball.vy += random.uniform(-self._s.BOUNCE_ANGLE_VARIANCE,
+                                   self._s.BOUNCE_ANGLE_VARIANCE)
+        self._enforce_min_vy(ball)
+        self._clamp_speed(ball)
+
+    def _enforce_min_vy(self, ball: "Ball") -> None:
+        if abs(ball.vy) < self._s.BALL_MIN_VY:
+            ball.vy = math.copysign(self._s.BALL_MIN_VY, ball.vy)
+
+    def _clamp_speed(self, ball: "Ball") -> None:
+        speed = math.hypot(ball.vx, ball.vy)
+        if speed > self._s.BALL_MAX_SPEED:
+            scale  = self._s.BALL_MAX_SPEED / speed
+            ball.vx *= scale
+            ball.vy *= scale
 
 
 class SoundManager:
@@ -186,17 +224,15 @@ class Ball(Drawable):
 
     def draw(self, surface: pygame.Surface) -> None:
         pygame.draw.circle(
-            surface,
-            self._s.WHITE,
-            (int(self.x), int(self.y)),
-            self._s.BALL_SIZE,
+            surface, self._s.WHITE,
+            (int(self.x), int(self.y)), self._s.BALL_SIZE,
         )
 
 
 class Paddle(Drawable, ABC):
     def __init__(self, x: int, settings: Settings) -> None:
         self._s = settings
-        self.x = x
+        self.x  = x
         self.y: float = (settings.SCREEN_HEIGHT - settings.PADDLE_HEIGHT) / 2
 
     @property
@@ -304,10 +340,12 @@ class MenuScene:
 class GameScene:
     def __init__(self, surface: pygame.Surface,
                  settings: Settings,
-                 sound: SoundManager) -> None:
+                 sound: SoundManager,
+                 physics: PhysicsEngine) -> None:
         self._surface = surface
         self._s       = settings
         self._sound   = sound
+        self._physics = physics
         self._clock   = pygame.time.Clock()
 
         self._ball  = Ball(settings)
@@ -357,12 +395,14 @@ class GameScene:
 
     def _check_collisions(self) -> None:
         if self._ball.hits_top_or_bottom():
-            self._ball.bounce_vertical()
+            self._physics.bounce_off_wall(self._ball)
             self._sound.play_wall_hit()
 
-        if (self._ball.rect.colliderect(self._p1.rect) or
-                self._ball.rect.colliderect(self._p2.rect)):
-            self._ball.bounce_horizontal()
+        if self._ball.rect.colliderect(self._p1.rect):
+            self._physics.bounce_off_paddle(self._ball, self._p1)
+            self._sound.play_paddle_hit()
+        elif self._ball.rect.colliderect(self._p2.rect):
+            self._physics.bounce_off_paddle(self._ball, self._p2)
             self._sound.play_paddle_hit()
 
         if self._ball.is_out_left():
@@ -370,14 +410,11 @@ class GameScene:
             print(f"Player 2: {self._board.score_p2}")
             self._sound.play_score()
             self._ball.reset()
-            self._ball.bounce_horizontal()
-
         elif self._ball.is_out_right():
             self._board.point_to_p1()
             print(f"Player 1: {self._board.score_p1}")
             self._sound.play_score()
             self._ball.reset()
-            self._ball.bounce_horizontal()
 
     def _render(self) -> None:
         self._surface.fill(self._s.BLACK)
@@ -392,9 +429,10 @@ def main() -> None:
     surface  = pygame.display.set_mode((settings.SCREEN_WIDTH, settings.SCREEN_HEIGHT))
     pygame.display.set_caption("Pong")
 
-    sound = SoundManager(settings)
-    menu  = MenuScene(surface, settings)
-    game  = GameScene(surface, settings, sound)
+    sound   = SoundManager(settings)
+    physics = PhysicsEngine(settings)
+    menu    = MenuScene(surface, settings)
+    game    = GameScene(surface, settings, sound, physics)
 
     while True:
         if not menu.run():
