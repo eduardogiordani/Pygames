@@ -1,13 +1,11 @@
 import sys
+import math
+import array
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import pygame
 
-
-# ──────────────────────────────────────────────
-# Configurações centralizadas
-# ──────────────────────────────────────────────
 
 @dataclass(frozen=True)
 class Settings:
@@ -25,37 +23,145 @@ class Settings:
     BALL_SPEED_Y:  float = 8.0
     AI_SPEED:      int   = 5
 
-    BLACK: tuple = field(default=(0, 0, 0))
+    AUDIO_FREQ:     int   = 44100
+    AUDIO_CHANNELS: int   = 2
+    AUDIO_BUFFER:   int   = 512
+    MUSIC_VOLUME:   float = 0.25
+    SFX_VOLUME:     float = 0.7
+
+    BLACK: tuple = field(default=(0,   0,   0))
     WHITE: tuple = field(default=(255, 255, 255))
 
-# ──────────────────────────────────────────────
-# Interface
-# ──────────────────────────────────────────────
 
 class Drawable(ABC):
-
     @abstractmethod
     def draw(self, surface: pygame.Surface) -> None: ...
 
-# ──────────────────────────────────────────────
-# Entidades de domínio
-# ──────────────────────────────────────────────
+
+class SoundManager:
+    def __init__(self, settings: Settings) -> None:
+        self._s = settings
+        pygame.mixer.init(
+            frequency=settings.AUDIO_FREQ,
+            size=-16,
+            channels=settings.AUDIO_CHANNELS,
+            buffer=settings.AUDIO_BUFFER,
+        )
+        self._paddle_sound = self._make_beep(frequency=480, duration_ms=40, wave="square")
+        self._wall_sound   = self._make_beep(frequency=220, duration_ms=35, wave="square")
+        self._score_sound  = self._make_score_jingle()
+        self._music        = self._make_music_loop()
+
+        self._paddle_sound.set_volume(settings.SFX_VOLUME)
+        self._wall_sound.set_volume(settings.SFX_VOLUME)
+        self._score_sound.set_volume(settings.SFX_VOLUME)
+
+    def play_paddle_hit(self) -> None:
+        self._paddle_sound.play()
+
+    def play_wall_hit(self) -> None:
+        self._wall_sound.play()
+
+    def play_score(self) -> None:
+        self._score_sound.play()
+
+    def start_music(self) -> None:
+        self._music.set_volume(self._s.MUSIC_VOLUME)
+        self._music.play(loops=-1)
+
+    def stop_music(self) -> None:
+        self._music.stop()
+
+    def _make_beep(self, frequency: float, duration_ms: int,
+                   wave: str = "sine") -> pygame.mixer.Sound:
+        n_samples = int(self._s.AUDIO_FREQ * duration_ms / 1000)
+        buf = array.array("h", [0] * (n_samples * self._s.AUDIO_CHANNELS))
+        amp = 32767 * 0.6
+
+        for i in range(n_samples):
+            t     = i / self._s.AUDIO_FREQ
+            phase = 2 * math.pi * frequency * t
+
+            if wave == "square":
+                raw = amp if math.sin(phase) >= 0 else -amp
+            elif wave == "sawtooth":
+                raw = amp * (2 * ((frequency * t) % 1) - 1)
+            else:
+                raw = amp * math.sin(phase)
+
+            envelope = max(0.0, 1.0 - i / n_samples)
+            sample   = int(raw * envelope)
+
+            if self._s.AUDIO_CHANNELS == 2:
+                buf[i * 2]     = sample
+                buf[i * 2 + 1] = sample
+            else:
+                buf[i] = sample
+
+        return pygame.mixer.Sound(buffer=buf)
+
+    def _make_score_jingle(self) -> pygame.mixer.Sound:
+        notes  = [330, 440, 550]
+        dur_ms = 100
+        n_note = int(self._s.AUDIO_FREQ * dur_ms / 1000)
+        total  = n_note * len(notes)
+        buf    = array.array("h", [0] * (total * self._s.AUDIO_CHANNELS))
+        amp    = 32767 * 0.55
+
+        for note_idx, freq in enumerate(notes):
+            offset = note_idx * n_note
+            for i in range(n_note):
+                t        = i / self._s.AUDIO_FREQ
+                envelope = max(0.0, 1.0 - i / n_note)
+                sample   = int(amp * math.sin(2 * math.pi * freq * t) * envelope)
+                pos      = (offset + i) * self._s.AUDIO_CHANNELS
+                if self._s.AUDIO_CHANNELS == 2:
+                    buf[pos]     = sample
+                    buf[pos + 1] = sample
+                else:
+                    buf[pos] = sample
+
+        return pygame.mixer.Sound(buffer=buf)
+
+    def _make_music_loop(self) -> pygame.mixer.Sound:
+        duration_s = 2.0
+        n_samples  = int(self._s.AUDIO_FREQ * duration_s)
+        buf        = array.array("h", [0] * (n_samples * self._s.AUDIO_CHANNELS))
+        amp        = 32767 * 0.18
+        bass_notes = [55, 69, 82, 110]
+        note_dur   = int(n_samples / len(bass_notes))
+
+        for note_idx, freq in enumerate(bass_notes):
+            start = note_idx * note_dur
+            end   = start + note_dur
+            for i in range(start, min(end, n_samples)):
+                t      = i / self._s.AUDIO_FREQ
+                val    = amp if math.sin(2 * math.pi * freq * t) >= 0 else -amp
+                local  = i - start
+                env    = min(1.0, local / (note_dur * 0.05))
+                sample = int(val * env)
+                pos    = i * self._s.AUDIO_CHANNELS
+                if self._s.AUDIO_CHANNELS == 2:
+                    buf[pos]     = sample
+                    buf[pos + 1] = sample
+                else:
+                    buf[pos] = sample
+
+        return pygame.mixer.Sound(buffer=buf)
+
 
 class Ball(Drawable):
-
     def __init__(self, settings: Settings) -> None:
         self._s = settings
         self.reset()
 
-    # ── estado público ──────────────────────────
     @property
     def rect(self) -> pygame.Rect:
         return pygame.Rect(self.x, self.y, self._s.BALL_SIZE, self._s.BALL_SIZE)
 
-    # ── comportamento ───────────────────────────
     def reset(self) -> None:
-        self.x: float = (self._s.SCREEN_WIDTH  - self._s.BALL_SIZE) / 2
-        self.y: float = (self._s.SCREEN_HEIGHT - self._s.BALL_SIZE) / 2
+        self.x: float  = (self._s.SCREEN_WIDTH  - self._s.BALL_SIZE) / 2
+        self.y: float  = (self._s.SCREEN_HEIGHT - self._s.BALL_SIZE) / 2
         self.vx: float = self._s.BALL_SPEED_X
         self.vy: float = self._s.BALL_SPEED_Y
 
@@ -88,8 +194,6 @@ class Ball(Drawable):
 
 
 class Paddle(Drawable, ABC):
-
-
     def __init__(self, x: int, settings: Settings) -> None:
         self._s = settings
         self.x = x
@@ -103,8 +207,7 @@ class Paddle(Drawable, ABC):
         )
 
     @abstractmethod
-    def update(self, ball: Ball) -> None:
-        ...
+    def update(self, ball: Ball) -> None: ...
 
     def _clamp(self) -> None:
         self.y = max(0.0, min(self.y, self._s.SCREEN_HEIGHT - self._s.PADDLE_HEIGHT))
@@ -114,14 +217,13 @@ class Paddle(Drawable, ABC):
 
 
 class HumanPaddle(Paddle):
-
     def __init__(self, x: int, settings: Settings,
                  key_up: int, key_down: int) -> None:
         super().__init__(x, settings)
         self._key_up   = key_up
         self._key_down = key_down
 
-    def update(self, ball: Ball) -> None:  # bola ignorado para jogador humano
+    def update(self, ball: Ball) -> None:
         keys = pygame.key.get_pressed()
         if keys[self._key_up]   and self.y > 0:
             self.y -= self._s.PADDLE_SPEED
@@ -131,40 +233,26 @@ class HumanPaddle(Paddle):
 
 
 class AIPaddle(Paddle):
-
     def update(self, ball: Ball) -> None:
-        paddle_center = self.y + self._s.PADDLE_HEIGHT / 2
-        if paddle_center < ball.y:
+        center = self.y + self._s.PADDLE_HEIGHT / 2
+        if center < ball.y:
             self.y += self._s.AI_SPEED
-        elif paddle_center > ball.y:
+        elif center > ball.y:
             self.y -= self._s.AI_SPEED
         self._clamp()
 
 
-# ──────────────────────────────────────────────
-# Placar
-# ──────────────────────────────────────────────
-
 class Scoreboard(Drawable):
-
-
     def __init__(self, settings: Settings) -> None:
         self._s = settings
         self.score_p1 = 0
         self.score_p2 = 0
         self._font = pygame.font.SysFont(None, 36)
 
-    def point_to_p1(self) -> None:
-        self.score_p1 += 1
-
-    def point_to_p2(self) -> None:
-        self.score_p2 += 1
-
-    def p1_wins(self) -> bool:
-        return self.score_p1 >= self._s.WINNING_SCORE
-
-    def p2_wins(self) -> bool:
-        return self.score_p2 >= self._s.WINNING_SCORE
+    def point_to_p1(self) -> None: self.score_p1 += 1
+    def point_to_p2(self) -> None: self.score_p2 += 1
+    def p1_wins(self) -> bool: return self.score_p1 >= self._s.WINNING_SCORE
+    def p2_wins(self) -> bool: return self.score_p2 >= self._s.WINNING_SCORE
 
     def draw(self, surface: pygame.Surface) -> None:
         text = self._font.render(
@@ -172,13 +260,8 @@ class Scoreboard(Drawable):
         )
         surface.blit(text, text.get_rect(center=(self._s.SCREEN_WIDTH // 2, 30)))
 
-# ──────────────────────────────────────────────
-# Telas / cenas
-# ──────────────────────────────────────────────
 
 class MenuScene:
-
-
     def __init__(self, surface: pygame.Surface, settings: Settings) -> None:
         self._surface  = surface
         self._s        = settings
@@ -186,7 +269,6 @@ class MenuScene:
         self._subtitle = pygame.font.SysFont(None, 26)
 
     def run(self) -> bool:
-
         while True:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
@@ -203,7 +285,7 @@ class MenuScene:
         text = self._title.render("Pong", True, self._s.WHITE)
         self._surface.blit(
             text,
-            text.get_rect(center=(self._s.SCREEN_WIDTH // 2,
+            text.get_rect(center=(self._s.SCREEN_WIDTH  // 2,
                                   self._s.SCREEN_HEIGHT // 4 + 50)),
         )
 
@@ -214,19 +296,18 @@ class MenuScene:
             )
             self._surface.blit(
                 text,
-                text.get_rect(center=(self._s.SCREEN_WIDTH // 2,
+                text.get_rect(center=(self._s.SCREEN_WIDTH  // 2,
                                       self._s.SCREEN_HEIGHT // 2 + 60)),
             )
 
-# ──────────────────────────────────────────────
-# Lógica de jogo
-# ──────────────────────────────────────────────
 
 class GameScene:
-
-    def __init__(self, surface: pygame.Surface, settings: Settings) -> None:
+    def __init__(self, surface: pygame.Surface,
+                 settings: Settings,
+                 sound: SoundManager) -> None:
         self._surface = surface
         self._s       = settings
+        self._sound   = sound
         self._clock   = pygame.time.Clock()
 
         self._ball  = Ball(settings)
@@ -243,24 +324,25 @@ class GameScene:
         self._drawables: list[Drawable] = [self._p1, self._p2, self._ball, self._board]
 
     def run(self) -> bool:
+        self._sound.start_music()
+        try:
+            while True:
+                if self._handle_events() is False:
+                    return False
 
-        while True:
-            if self._handle_events() is False:
-                return False
+                self._update()
+                self._render()
 
-            self._update()
-            self._render()
+                if self._board.p1_wins():
+                    print("Player 1 venceu!")
+                    return True
+                if self._board.p2_wins():
+                    print("Player 2 venceu!")
+                    return True
 
-            if self._board.p1_wins():
-                print("Player 1 venceu!")
-                return True
-            if self._board.p2_wins():
-                print("Player 2 venceu!")
-                return True
-
-            self._clock.tick(self._s.FPS)
-
-    # ── privados ────────────────────────────────
+                self._clock.tick(self._s.FPS)
+        finally:
+            self._sound.stop_music()
 
     def _handle_events(self):
         for event in pygame.event.get():
@@ -276,20 +358,24 @@ class GameScene:
     def _check_collisions(self) -> None:
         if self._ball.hits_top_or_bottom():
             self._ball.bounce_vertical()
+            self._sound.play_wall_hit()
 
         if (self._ball.rect.colliderect(self._p1.rect) or
                 self._ball.rect.colliderect(self._p2.rect)):
             self._ball.bounce_horizontal()
+            self._sound.play_paddle_hit()
 
         if self._ball.is_out_left():
             self._board.point_to_p2()
             print(f"Player 2: {self._board.score_p2}")
+            self._sound.play_score()
             self._ball.reset()
             self._ball.bounce_horizontal()
 
         elif self._ball.is_out_right():
             self._board.point_to_p1()
             print(f"Player 1: {self._board.score_p1}")
+            self._sound.play_score()
             self._ball.reset()
             self._ball.bounce_horizontal()
 
@@ -300,18 +386,15 @@ class GameScene:
         pygame.display.flip()
 
 
-# ──────────────────────────────────────────────
-# Ponto de entrada
-# ──────────────────────────────────────────────
-
 def main() -> None:
     pygame.init()
     settings = Settings()
     surface  = pygame.display.set_mode((settings.SCREEN_WIDTH, settings.SCREEN_HEIGHT))
     pygame.display.set_caption("Pong")
 
-    menu = MenuScene(surface, settings)
-    game = GameScene(surface, settings)
+    sound = SoundManager(settings)
+    menu  = MenuScene(surface, settings)
+    game  = GameScene(surface, settings, sound)
 
     while True:
         if not menu.run():
