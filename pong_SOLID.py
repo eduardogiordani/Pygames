@@ -28,6 +28,9 @@ class Settings:
     BALL_MIN_VY:           float = 1.5
     BALL_MAX_SPEED:        float = 14.0
 
+    POWERUP_INTERVAL_MS:   int   = 5000
+    POWERUP_BALL_COUNT:    int   = 3
+
     AUDIO_FREQ:     int   = 44100
     AUDIO_CHANNELS: int   = 2
     AUDIO_BUFFER:   int   = 512
@@ -56,8 +59,7 @@ class PhysicsEngine:
 
     def bounce_off_paddle(self, ball: "Ball", paddle: "Paddle") -> None:
         ball.vx = -ball.vx
-
-        offset = (ball.y - (paddle.y + self._s.PADDLE_HEIGHT / 2)) / (self._s.PADDLE_HEIGHT / 2)
+        offset   = (ball.y - (paddle.y + self._s.PADDLE_HEIGHT / 2)) / (self._s.PADDLE_HEIGHT / 2)
         ball.vy += offset * self._s.BOUNCE_ANGLE_VARIANCE * 2
         ball.vy += random.uniform(-self._s.BOUNCE_ANGLE_VARIANCE,
                                    self._s.BOUNCE_ANGLE_VARIANCE)
@@ -71,7 +73,7 @@ class PhysicsEngine:
     def _clamp_speed(self, ball: "Ball") -> None:
         speed = math.hypot(ball.vx, ball.vy)
         if speed > self._s.BALL_MAX_SPEED:
-            scale  = self._s.BALL_MAX_SPEED / speed
+            scale   = self._s.BALL_MAX_SPEED / speed
             ball.vx *= scale
             ball.vy *= scale
 
@@ -189,8 +191,12 @@ class SoundManager:
 
 
 class Ball(Drawable):
-    def __init__(self, settings: Settings) -> None:
-        self._s = settings
+    def __init__(self, settings: Settings,
+                 is_real: bool = True,
+                 color: tuple = None) -> None:
+        self._s      = settings
+        self.is_real = is_real
+        self.color   = color if color is not None else settings.WHITE
         self.reset()
 
     @property
@@ -219,12 +225,15 @@ class Ball(Drawable):
     def is_out_right(self) -> bool:
         return self.x >= self._s.SCREEN_WIDTH - self._s.BALL_SIZE
 
+    def is_out_of_bounds(self) -> bool:
+        return self.x <= 0 or self.x >= self._s.SCREEN_WIDTH - self._s.BALL_SIZE
+
     def hits_top_or_bottom(self) -> bool:
         return self.y <= 0 or self.y >= self._s.SCREEN_HEIGHT - self._s.BALL_SIZE
 
     def draw(self, surface: pygame.Surface) -> None:
         pygame.draw.circle(
-            surface, self._s.WHITE,
+            surface, self.color,
             (int(self.x), int(self.y)), self._s.BALL_SIZE,
         )
 
@@ -276,6 +285,45 @@ class AIPaddle(Paddle):
         elif center > ball.y:
             self.y -= self._s.AI_SPEED
         self._clamp()
+
+
+class PowerUpManager:
+    def __init__(self, settings: Settings) -> None:
+        self._s              = settings
+        self._last_powerup   = pygame.time.get_ticks()
+        self._powerup_ready  = False
+
+    def tick(self) -> None:
+        elapsed = pygame.time.get_ticks() - self._last_powerup
+        if elapsed >= self._s.POWERUP_INTERVAL_MS:
+            self._powerup_ready = True
+
+    def should_fragment(self) -> bool:
+        return self._powerup_ready
+
+    def spawn_fragments(self, origin: Ball) -> list:
+        self._powerup_ready  = False
+        self._last_powerup   = pygame.time.get_ticks()
+
+        fragments = []
+        for _ in range(self._s.POWERUP_BALL_COUNT):
+            color = (
+                random.randint(80, 255),
+                random.randint(80, 255),
+                random.randint(80, 255),
+            )
+            fake       = Ball(self._s, is_real=False, color=color)
+            fake.x     = origin.x
+            fake.y     = origin.y
+            fake.vx    = origin.vx * random.uniform(0.8, 1.2) * random.choice([-1, 1])
+            fake.vy    = origin.vy * random.uniform(0.8, 1.2) * random.choice([-1, 1])
+            fragments.append(fake)
+
+        return fragments
+
+    def reset(self) -> None:
+        self._last_powerup  = pygame.time.get_ticks()
+        self._powerup_ready = False
 
 
 class Scoreboard(Drawable):
@@ -341,15 +389,15 @@ class GameScene:
     def __init__(self, surface: pygame.Surface,
                  settings: Settings,
                  sound: SoundManager,
-                 physics: PhysicsEngine) -> None:
+                 physics: PhysicsEngine,
+                 powerup: PowerUpManager) -> None:
         self._surface = surface
         self._s       = settings
         self._sound   = sound
         self._physics = physics
+        self._powerup = powerup
         self._clock   = pygame.time.Clock()
-
-        self._ball  = Ball(settings)
-        self._board = Scoreboard(settings)
+        self._board   = Scoreboard(settings)
 
         self._p1: Paddle = HumanPaddle(
             x=15, settings=settings,
@@ -359,7 +407,9 @@ class GameScene:
             x=settings.SCREEN_WIDTH - 15 - settings.PADDLE_WIDTH,
             settings=settings,
         )
-        self._drawables: list[Drawable] = [self._p1, self._p2, self._ball, self._board]
+
+        self._real_ball: Ball    = Ball(settings, is_real=True, color=settings.WHITE)
+        self._balls: list[Ball]  = [self._real_ball]
 
     def run(self) -> bool:
         self._sound.start_music()
@@ -388,38 +438,68 @@ class GameScene:
                 return False
 
     def _update(self) -> None:
-        self._ball.move()
-        self._p1.update(self._ball)
-        self._p2.update(self._ball)
+        self._powerup.tick()
+        self._p1.update(self._real_ball)
+        self._p2.update(self._real_ball)
+
+        for ball in self._balls:
+            ball.move()
+
         self._check_collisions()
+        self._discard_fake_balls()
 
     def _check_collisions(self) -> None:
-        if self._ball.hits_top_or_bottom():
-            self._physics.bounce_off_wall(self._ball)
-            self._sound.play_wall_hit()
+        new_fragments: list[Ball] = []
 
-        if self._ball.rect.colliderect(self._p1.rect):
-            self._physics.bounce_off_paddle(self._ball, self._p1)
-            self._sound.play_paddle_hit()
-        elif self._ball.rect.colliderect(self._p2.rect):
-            self._physics.bounce_off_paddle(self._ball, self._p2)
-            self._sound.play_paddle_hit()
+        for ball in self._balls:
+            if ball.hits_top_or_bottom():
+                self._physics.bounce_off_wall(ball)
+                self._sound.play_wall_hit()
 
-        if self._ball.is_out_left():
-            self._board.point_to_p2()
-            print(f"Player 2: {self._board.score_p2}")
-            self._sound.play_score()
-            self._ball.reset()
-        elif self._ball.is_out_right():
-            self._board.point_to_p1()
-            print(f"Player 1: {self._board.score_p1}")
-            self._sound.play_score()
-            self._ball.reset()
+            hit_paddle = None
+            if ball.rect.colliderect(self._p1.rect):
+                hit_paddle = self._p1
+            elif ball.rect.colliderect(self._p2.rect):
+                hit_paddle = self._p2
+
+            if hit_paddle is not None:
+                self._physics.bounce_off_paddle(ball, hit_paddle)
+                self._sound.play_paddle_hit()
+
+                if ball.is_real and self._powerup.should_fragment():
+                    new_fragments = self._powerup.spawn_fragments(ball)
+
+            if ball.is_real:
+                if ball.is_out_left():
+                    self._board.point_to_p2()
+                    print(f"Player 2: {self._board.score_p2}")
+                    self._sound.play_score()
+                    self._reset_round()
+                    return
+                elif ball.is_out_right():
+                    self._board.point_to_p1()
+                    print(f"Player 1: {self._board.score_p1}")
+                    self._sound.play_score()
+                    self._reset_round()
+                    return
+
+        self._balls.extend(new_fragments)
+
+    def _discard_fake_balls(self) -> None:
+        self._balls = [b for b in self._balls if b.is_real or not b.is_out_of_bounds()]
+
+    def _reset_round(self) -> None:
+        self._real_ball.reset()
+        self._balls = [self._real_ball]
+        self._powerup.reset()
 
     def _render(self) -> None:
         self._surface.fill(self._s.BLACK)
-        for drawable in self._drawables:
-            drawable.draw(self._surface)
+        self._p1.draw(self._surface)
+        self._p2.draw(self._surface)
+        for ball in self._balls:
+            ball.draw(self._surface)
+        self._board.draw(self._surface)
         pygame.display.flip()
 
 
@@ -431,8 +511,9 @@ def main() -> None:
 
     sound   = SoundManager(settings)
     physics = PhysicsEngine(settings)
+    powerup = PowerUpManager(settings)
     menu    = MenuScene(surface, settings)
-    game    = GameScene(surface, settings, sound, physics)
+    game    = GameScene(surface, settings, sound, physics, powerup)
 
     while True:
         if not menu.run():
