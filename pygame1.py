@@ -24,8 +24,9 @@ def renderizar(p):
     p["rect"] = p["surf"].get_rect(topleft=(p["rect"].x, p["rect"].y))
 
 palavras = [
-    {"nome": "EDUARDO", "cor": nova_cor(), "v": [2, 2]},
-    {"nome": "RAFAEL",  "cor": nova_cor(), "v": [-2, -2]},
+    {"nome": "EDUARDO", "cor": nova_cor(), "v": [5, 5]},
+    {"nome": "RAFAEL",  "cor": nova_cor(), "v": [0, 0]},
+    {"nome": "TERCEIRO",  "cor": nova_cor(), "v": [-5, -5]},
 ]
 
 
