@@ -158,6 +158,7 @@ main()
 
 ## 👤 Autor
 
+
 **Eduardo Giordani**  
 Disciplina: Computação Gráfica e Tecnologias Imersivas  
 [![GitHub](https://img.shields.io/badge/GitHub-eduardogiordani-181717?style=flat&logo=github)](https://github.com/eduardogiordani/Pygames)
